@@ -40,7 +40,8 @@ def get_all_emp_info(db):  # TODO: Improve when ordering efficiency
         stmt += " AND "+ent[0]
         values.append(ent[1])
 
-    # stmt += " LIMIT 5550"  # TOtO: Remove limit 5000 debug efficiency workaround
+    # This ORDER BY statement is commented out because it significantly affects the query performance
+    # stmt += " ORDER BY emp_no"
 
     cursor.execute(stmt, values)
     result = cursor.fetchall()

@@ -7,6 +7,35 @@ from calendar import monthrange
 from PIL import Image, ImageTk
 
 
+# This class helps avoiding to load the whole result into RAM
+# It should act like the result of cursor.fetchall(), a normal list of tuples
+# To safe some time not all list functions have been implemented
+class CachedResult:
+    def __init__(self, cursor, initial_cache_size=0):
+        self._cursor = cursor
+        self.result = []
+        self.fullyCached = False
+        self.cache(initial_cache_size)
+
+    def __del__(self):
+        self._cursor.close()
+
+    def __getitem__(self, index):
+        if index >= len(self.result):
+            self.result.append(self._cursor.fetchmany(index - len(self.result) + 1))
+
+        return self.result[index]
+
+    def __len__(self):
+        return len(self.result)
+
+    def cache(self, size):
+        self.result += self._cursor.fetchmany(size-1)
+        row = self._cursor.fetchmany(1)
+        self.fullyCached = row == []
+        self.result += row
+
+
 # Database methods
 def add_emp(emp_no, first_name, last_name, gender, birth_date, salary, title, dept_no, db):
     cursor = db.cursor()
@@ -24,28 +53,26 @@ def add_emp(emp_no, first_name, last_name, gender, birth_date, salary, title, de
     db.commit()
 
 
-def get_all_emp_info(db):  # TODO: Improve when ordering efficiency
+def get_all_emp_info(db):
     cursor = db.cursor()
-
+    # The e.emp_no<~0 statement is important for ordering performance for some reasons...
     stmt = "SELECT e.emp_no, first_name, last_name, gender, birth_date, hire_date, salary, dept_name, title\
                 FROM employees e\
                 JOIN salaries s ON e.emp_no = s.emp_no\
                 JOIN titles t ON e.emp_no = t.emp_no\
                 JOIN dept_emp de on e.emp_no = de.emp_no\
                 JOIN departments d on de.dept_no = d.dept_no\
-            WHERE YEAR(s.to_date)=9999 AND YEAR(t.to_date)=9999 AND YEAR(de.to_date)=9999"
+            WHERE YEAR(s.to_date)=9999 AND YEAR(t.to_date)=9999 AND YEAR(de.to_date)=9999 AND e.emp_no<~0"
     values = []
 
     for ent in filter_list:
         stmt += " AND "+ent[0]
         values.append(ent[1])
 
-    # This ORDER BY statement is commented out because it significantly affects the query performance
-    # stmt += " ORDER BY emp_no"
+    stmt += " ORDER BY e.emp_no"
 
     cursor.execute(stmt, values)
-    result = cursor.fetchall()
-    cursor.close()
+    result = CachedResult(cursor)
     return result
 
 
@@ -58,6 +85,15 @@ def rm_emp(emp_no, db):
     cursor.close()
     db.commit()
 
+def rm_emp_range(emp_range, db):
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM employees WHERE emp_no>=%s AND emp_no<=%s", (emp_range['low'], emp_range['high']))
+    cursor.execute("DELETE FROM salaries WHERE emp_no>=%s AND emp_no<=%s", (emp_range['low'], emp_range['high']))
+    cursor.execute("DELETE FROM titles WHERE emp_no>=%s AND emp_no<=%s", (emp_range['low'], emp_range['high']))
+    cursor.execute("DELETE FROM dept_emp WHERE emp_no>=%s AND emp_no<=%s", (emp_range['low'], emp_range['high']))
+    cursor.close()
+    db.commit()
+
 
 def change_salary(emp_no, salary, db):
     cursor = db.cursor()
@@ -66,6 +102,22 @@ def change_salary(emp_no, salary, db):
 
     stmt = "INSERT INTO salaries VALUES(%s, %s, NOW(), '9999-01-01')"
     cursor.execute(stmt, (emp_no, salary))
+    cursor.close()
+    db.commit()
+
+def change_salary_range(emp_range, salary, db):
+    cursor = db.cursor()
+
+    cursor.execute("SELECT emp_no FROM salaries WHERE emp_no>=%s AND emp_no<=%s AND YEAR(to_date)=9999 GROUP BY emp_no",
+                   (emp_range['low'], emp_range['high']))
+
+    real_emp_range = cursor.fetchall()
+
+    stmt = "UPDATE salaries SET to_date=NOW() WHERE YEAR(to_date)=9999 AND emp_no>=%s AND emp_no<=%s"
+    cursor.execute(stmt, (emp_range['low'], emp_range['high']))
+
+    for emp_no in real_emp_range:
+        cursor.execute("INSERT INTO salaries VALUES(%s, %s, NOW(), '9999-01-01')", (emp_no[0], salary))
     cursor.close()
     db.commit()
 
@@ -145,6 +197,26 @@ def date_entry(master, text, row, columns=(0, 1)):
 def is_integer(var):
     try:
         int(var)
+        # Calculation should not be parsed as integers
+        if '*' in var or '/' in var:
+            return False
+
+        if '+' in var[1:] or '-' in var[1:]:
+            return False
+
+        return True
+    except ValueError:
+        return False
+
+
+def parse_range(var, range_dict):
+    if '-' not in var:
+        return False
+
+    r = var.split('-')
+    try:
+        range_dict['low'] = int(r[0])
+        range_dict['high'] = int(r[1])
         return True
     except ValueError:
         return False
@@ -153,6 +225,7 @@ def is_integer(var):
 def update_emp_table():
     global emps, cnt
     emps = get_all_emp_info(dab)
+    emps.cache(cnt)
     if cnt > len(emps):
         cnt = (len(emps) // EMP_PER_PAGE + 1) * EMP_PER_PAGE
 
@@ -177,28 +250,31 @@ def emp_table(emp_data, table_frame, nxt_btn, prv_btn, btm_lbl, range_low, range
     # Destroy all elements in the table except header
     # You could also just destroy the unnecessary elements and change the text of the slave labels,
     # which would be smoother but leads to a bug in tkinter
-    _r = 1
+    r = 1
     while True:
-        column = table_frame.grid_slaves(row=_r)
+        column = table_frame.grid_slaves(row=r)
         if len(column) <= 0:
             break
         for cell in column:
             cell.destroy()
-        _r += 1
+        r += 1
 
-    _r = 0
-    for _i in range(range_low, range_high):
-        _c = 0
-        _r += 1
-        for _d in emp_data[_i]:
-            tkinter.Label(table_frame, text=_d, width=widths[_c], bd=2, anchor="w", relief="sunken", bg="snow").grid(row=_r, column=_c)
-            _c += 1
+    r = 0
+    for i in range(range_low, range_high):
+        c = 0
+        r += 1
+        for _d in emp_data[i]:
+            tkinter.Label(table_frame, text=_d, width=widths[c], bd=2, anchor="w", relief="sunken", bg="snow").grid(row=r, column=c)
+            c += 1
 
     btm_lbl['text'] = str(range_high) + " of " + str(len(emp_data))
+    if not emp_data.fullyCached:
+        btm_label['text'] += '+'
 
 
 def nxt():
     global cnt
+    emps.cache(EMP_PER_PAGE)
     emp_table(emps, table, next_btn, prev_btn, btm_label, cnt, cnt + EMP_PER_PAGE)
     cnt += EMP_PER_PAGE
 
@@ -219,14 +295,28 @@ def check_entry_len(entry, max_len, name="String"):
         return True
 
 
+def check_entry_int(entry):
+    if is_integer(entry.get()):
+        entry['highlightbackground'] = default_highlightbackground
+        return True
+    else:
+        entry['highlightbackground'] = "red"
+        return False
+
+
+def check_entry_int_range(entry, range_dict):
+    if is_integer(entry.get()) or parse_range(entry.get(), range_dict):
+        entry['highlightbackground'] = default_highlightbackground
+        return True
+    else:
+        entry['highlightbackground'] = "red"
+        return False
+
+
 def add_submit(entries, departments, popup):
     no_error = True
     for i in (0, 5):
-        if is_integer(entries[i].get()):
-            entries[i]['highlightbackground'] = default_highlightbackground
-        else:
-            entries[i]['highlightbackground'] = "red"
-            no_error = False
+        no_error &= check_entry_int(entries[i])
 
     no_error &= check_entry_len(entries[1], 14, "First name")
     no_error &= check_entry_len(entries[2], 16, "Last name")
@@ -249,18 +339,19 @@ def add_submit(entries, departments, popup):
 
 def rm_submit(entry_emp, popup):
     emp_no = entry_emp.get()
+    range_dict = {'low': None, 'high': None}
 
-    if is_integer(emp_no):
-        entry_emp['highlightbackground'] = default_highlightbackground
-    else:
-        entry_emp['highlightbackground'] = "red"
-        tkinter.messagebox.showinfo("Usage", "emp_no must be a single integer, a range of integers or a comma-seperated list of integers!")
+    if not check_entry_int_range(entry_emp, range_dict):
+        tkinter.messagebox.showinfo("Usage", "emp_no must be a single integer or a range of integers!")
         return
 
     if tkinter.messagebox.askokcancel("Really delete "+str(emp_no)+"?", "Do you really want to delete \""+str(emp_no) +
                                                                         "\"?\nThis action cant be reverted!"):
         try:
-            rm_emp(emp_no, dab)
+            if None in range_dict.values():
+                rm_emp(emp_no, dab)
+            else:
+                rm_emp_range(range_dict, dab)
             update_emp_table()
             popup.destroy()
         except mysql.connector.errors.Error as ex:
@@ -269,23 +360,25 @@ def rm_submit(entry_emp, popup):
 
 def salary_submit(entries, popup):
     no_error = True
-    for i in entries:
-        if is_integer(i.get()):
-            i['highlightbackground'] = default_highlightbackground
-        else:
-            i['highlightbackground'] = "red"
-            no_error = False
+    range_dict = {'low': None, 'high': None}
+
+    no_error &= check_entry_int_range(entries[0], range_dict)
+    no_error &= check_entry_int(entries[1])
 
     if no_error:
-        if tkinter.messagebox.askokcancel(
-            "Really change salary?",
-            "Do you really want to change the salary of \"{}\" to {}?".format(entries[0].get(), entries[1].get())):
+        if tkinter.messagebox.askokcancel("Really change salary?", "Do you really want to change the salary of \"{}\" to {}?".format(entries[0].get(), entries[1].get())):
             try:
-                change_salary(entries[0].get(), entries[1].get(), dab)
+                if None in range_dict.values():
+                    change_salary(entries[0].get(), entries[1].get(), dab)
+                else:
+                    change_salary_range(range_dict, entries[1].get(), dab)
                 update_emp_table()
                 popup.destroy()
             except mysql.connector.errors.Error as ex:
                 tkinter.messagebox.showerror("Error changing salary", "The operation failed with following error: \n" + str(ex))
+    else:
+        tkinter.messagebox.showinfo("Usage", "emp_no must be a single integer or a range of integers!\n"
+                                             "salary must be a single, positive integer!")
 
 
 def eval_filter_entry(name, value, radio_value):
@@ -297,14 +390,19 @@ def eval_filter_entry(name, value, radio_value):
 
 def filter_submit(entries, popup):
     global filter_list
-    filter_list=[]
+    filter_list = []
+    range_dict = {}
     if len(entries[0].get()) > 0:
         if is_integer(entries[0].get()):
             entries[0]['highlightbackground'] = default_highlightbackground
+            filter_list.append(('e.emp_no=%s', entries[0].get()))
+        elif parse_range(entries[0].get(), range_dict):
+            entries[0]['highlightbackground'] = default_highlightbackground
+            filter_list.append(('e.emp_no>=%s', range_dict['low']))
+            filter_list.append(('e.emp_no<=%s', range_dict['high']))
         else:
             entries[0]['highlightbackground'] = "red"
             return
-        filter_list.append(('e.emp_no=%s', entries[0].get()))
 
     eval_filter_entry('first_name', entries[1].get(), first_like_var.get())
     eval_filter_entry('last_name', entries[2].get(), last_like_var.get())
@@ -319,6 +417,7 @@ def filter_submit(entries, popup):
 def add():
     popup = tkinter.Toplevel(root)
     popup.title("Create employee")
+    popup.tk.call('wm', 'iconphoto', popup._w, add_img)
     popup.grab_set()
 
     frm = tkinter.Frame(popup)
@@ -356,10 +455,11 @@ def add():
     tkinter.Button(popup, text="Add employee", height=2, command=lambda: add_submit(entries, depts, popup)).pack(pady=(3, 0))
 
 
-# TODO: Add range and list support
+# TODO: Add comma seperated list support
 def remove():
     popup = tkinter.Toplevel(root)
     popup.title("Delete employees")
+    popup.tk.call('wm', 'iconphoto', popup._w, remove_img)
     popup.grab_set()
 
     frm = tkinter.Frame(popup)
@@ -374,6 +474,7 @@ def remove():
 def salary_popup():
     popup = tkinter.Toplevel(root)
     popup.title("Change salary")
+    popup.tk.call('wm', 'iconphoto', popup._w, salary_img)
     popup.grab_set()
 
     frm = tkinter.Frame(popup)
@@ -390,16 +491,14 @@ def salary_popup():
 def filter_emp():
     popup = tkinter.Toplevel(root)
     popup.title("Filter employees")
+    popup.tk.call('wm', 'iconphoto', popup._w, filter_img)
     popup.grab_set()
 
     frm = tkinter.Frame(popup)
     frm.pack(pady=5)
 
-    entries = [labeled_entry(frm, "emp_no", 0, columns=(0, 2))]  # TODO: Rename "equals" to "is" when range is implemented
-    tkinter.Label(frm, text="equals").grid(row=0, column=1)
-
-    # Seperator:
-    # tkinter.Label(frm, text="", height=0).grid(row=1, column=0)
+    entries = [labeled_entry(frm, "emp_no", 0, columns=(0, 2))]
+    tkinter.Label(frm, text="in").grid(row=0, column=1)
 
     global first_like_var
     first_like_var = tkinter.IntVar(None, 0)
@@ -425,7 +524,7 @@ def filter_emp():
     tkinter.Button(popup, text="Filter", height=2, command=lambda: filter_submit(entries, popup)).pack()
 
 
-def connect_to_db(entries, success, db_wrapper, emps_wrapper):
+def connect_to_db(entries, success, db_wrapper, emp_wrapper):
     try:
         db_wrapper.append(mysql.connector.connect(
             user=entries[0].get(),
@@ -436,24 +535,22 @@ def connect_to_db(entries, success, db_wrapper, emps_wrapper):
         ))
 
         success.set(1)
-        emps_wrapper.append(get_all_emp_info(db_wrapper[0]))
+        emp_wrapper.append(get_all_emp_info(db_wrapper[0]))
         root.destroy()
     except mysql.connector.Error as ex:
-        tkinter.messagebox.showerror("Error connecting to database", "Conencting to database server failed with following error: \n" + str(ex))
+        tkinter.messagebox.showerror("Error connecting to database", "Connecting to database server failed with following error: \n" + str(ex))
 
 
+root = tkinter.Tk()
 version = "v1.0"
 EMP_PER_PAGE = 500
 widths = [9, 14, 16, 6, 10, 10, 9, 20, 20]
 filter_list = []
+default_highlightbackground = tkinter.Entry(None).cget('highlightbackground')
 
-root = tkinter.Tk()
 root.title("EnterpriseManager "+version+" - Connect to database")
-
 icon_img = open_image('business.png', 512, 512)
 root.tk.call('wm', 'iconphoto', root._w, icon_img)
-
-default_highlightbackground = tkinter.Entry(None).cget('highlightbackground')
 
 ### LOGIN ###
 login_success = tkinter.IntVar(None, False)
@@ -462,14 +559,14 @@ emps_wrapper = []
 login_frame = tkinter.Frame(root)
 login_frame.pack(padx=10, pady=10)
 
-entries = [labeled_entry(login_frame, "Username: ", 0),
+entry_fields = [labeled_entry(login_frame, "Username: ", 0),
            labeled_entry(login_frame, "Password: ", 1, show='*'),
            labeled_entry(login_frame, "Database: ", 2),
            labeled_entry(login_frame, "Host: ", 3, placeholder="localhost", pady=(10, 0)),
            labeled_entry(login_frame, "Port: ", 4, placeholder="3306")]
 
 tkinter.Button(root, text="Connect", bg="#90EE90", activebackground="#90DD90",
-               command=lambda: connect_to_db(entries, login_success, dab_wrapper, emps_wrapper)).pack()
+               command=lambda: connect_to_db(entry_fields, login_success, dab_wrapper, emps_wrapper)).pack()
 root.mainloop()
 ### END LOGIN ###
 
@@ -508,7 +605,7 @@ table = tkinter.Frame(canvas_frame)
 scrollbar = tkinter.Scrollbar(container_emp, orient="vertical", bg="azure2", troughcolor="snow3", command=canvas.yview)
 container_nav = tkinter.Frame(root, bg="snow2")
 
-# TODO: Center table
+# TODO: Center table and make scrollable
 canvas.configure(yscrollcommand=scrollbar.set)
 canvas.create_window((0, 0), window=canvas_frame, anchor='nw')
 canvas_frame.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
@@ -527,10 +624,10 @@ prev_btn.pack(side="left")
 next_btn.pack(side="right")
 btm_label.pack(anchor="center", side="bottom")
 
-c = 0
+col = 0
 for s in ("emp_no", "first_name", "last_name", "gender", "birth_date", "hire_date", "salary", "dept_name", "title"):
-    tkinter.Label(table, text=s, width=widths[c], bd=2, relief="sunken", bg="peach puff").grid(row=0, column=c)
-    c += 1
+    tkinter.Label(table, text=s, width=widths[col], bd=2, relief="sunken", bg="peach puff").grid(row=0, column=col)
+    col += 1
 
 nxt()
 

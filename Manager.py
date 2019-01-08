@@ -7,35 +7,6 @@ from calendar import monthrange
 from PIL import Image, ImageTk
 
 
-# This class helps avoiding to load the whole result into RAM
-# It should act like the result of cursor.fetchall(), a normal list of tuples
-# To safe some time not all list functions have been implemented
-class CachedResult:
-    def __init__(self, cursor, initial_cache_size=0):
-        self._cursor = cursor
-        self.result = []
-        self.fullyCached = False
-        self.cache(initial_cache_size)
-
-    def __del__(self):
-        self._cursor.close()
-
-    def __getitem__(self, index):
-        if index >= len(self.result):
-            self.result.append(self._cursor.fetchmany(index - len(self.result) + 1))
-
-        return self.result[index]
-
-    def __len__(self):
-        return len(self.result)
-
-    def cache(self, size):
-        self.result += self._cursor.fetchmany(size-1)
-        row = self._cursor.fetchmany(1)
-        self.fullyCached = row == []
-        self.result += row
-
-
 # Database methods
 def add_emp(emp_no, first_name, last_name, gender, birth_date, salary, title, dept_no, db):
     cursor = db.cursor()
@@ -53,7 +24,7 @@ def add_emp(emp_no, first_name, last_name, gender, birth_date, salary, title, de
     db.commit()
 
 
-def get_all_emp_info(db):
+def get_emps(db, low=None, high=None):
     cursor = db.cursor()
     # The e.emp_no<~0 statement is important for ordering performance for some reasons...
     stmt = "SELECT e.emp_no, first_name, last_name, gender, birth_date, hire_date, salary, dept_name, title\
@@ -71,8 +42,12 @@ def get_all_emp_info(db):
 
     stmt += " ORDER BY e.emp_no"
 
+    if low is not None and high is not None:
+        stmt += " LIMIT %s,%s"
+        values += [low, high-low]
+
     cursor.execute(stmt, values)
-    result = CachedResult(cursor)
+    result = cursor.fetchall()
     return result
 
 
@@ -224,8 +199,7 @@ def parse_range(var, range_dict):
 
 def update_emp_table():
     global emps, cnt
-    emps = get_all_emp_info(dab)
-    emps.cache(cnt)
+    emps = get_emps(dab)
     if cnt > len(emps):
         cnt = (len(emps) // EMP_PER_PAGE + 1) * EMP_PER_PAGE
 
@@ -268,13 +242,10 @@ def emp_table(emp_data, table_frame, nxt_btn, prv_btn, btm_lbl, range_low, range
             c += 1
 
     btm_lbl['text'] = str(range_high) + " of " + str(len(emp_data))
-    if not emp_data.fullyCached:
-        btm_label['text'] += '+'
 
 
 def nxt():
     global cnt
-    emps.cache(EMP_PER_PAGE)
     emp_table(emps, table, next_btn, prev_btn, btm_label, cnt, cnt + EMP_PER_PAGE)
     cnt += EMP_PER_PAGE
 
@@ -535,7 +506,7 @@ def connect_to_db(entries, success, db_wrapper, emp_wrapper):
         ))
 
         success.set(1)
-        emp_wrapper.append(get_all_emp_info(db_wrapper[0]))
+        emp_wrapper.append(get_emps(db_wrapper[0]))
         root.destroy()
     except mysql.connector.Error as ex:
         tkinter.messagebox.showerror("Error connecting to database", "Connecting to database server failed with following error: \n" + str(ex))

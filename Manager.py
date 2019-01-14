@@ -6,7 +6,6 @@ import tkinter.messagebox
 from calendar import monthrange
 from PIL import Image, ImageTk
 
-
 # Database methods
 def add_emp(emp_no, first_name, last_name, gender, birth_date, salary, title, dept_no, db):
     cursor = db.cursor()
@@ -469,7 +468,7 @@ def filter_emp():
     frm.pack(pady=5)
 
     entries = [labeled_entry(frm, "emp_no", 0, columns=(0, 2))]
-    tkinter.Label(frm, text="in").grid(row=0, column=1)
+    tkinter.Label(frm, text="is").grid(row=0, column=1)
 
     global first_like_var
     first_like_var = tkinter.IntVar(None, 0)
@@ -513,7 +512,7 @@ def connect_to_db(entries, success, db_wrapper, emp_wrapper):
 
 
 root = tkinter.Tk()
-version = "v1.0"
+version = "v1.1"
 EMP_PER_PAGE = 500
 widths = [9, 14, 16, 6, 10, 10, 9, 20, 20]
 filter_list = []
@@ -531,10 +530,10 @@ login_frame = tkinter.Frame(root)
 login_frame.pack(padx=10, pady=10)
 
 entry_fields = [labeled_entry(login_frame, "Username: ", 0),
-           labeled_entry(login_frame, "Password: ", 1, show='*'),
-           labeled_entry(login_frame, "Database: ", 2),
-           labeled_entry(login_frame, "Host: ", 3, placeholder="localhost", pady=(10, 0)),
-           labeled_entry(login_frame, "Port: ", 4, placeholder="3306")]
+                labeled_entry(login_frame, "Password: ", 1, show='*'),
+                labeled_entry(login_frame, "Database: ", 2),
+                labeled_entry(login_frame, "Host: ", 3, placeholder="localhost", pady=(10, 0)),
+                labeled_entry(login_frame, "Port: ", 4, placeholder="3306")]
 
 tkinter.Button(root, text="Connect", bg="#90EE90", activebackground="#90DD90",
                command=lambda: connect_to_db(entry_fields, login_success, dab_wrapper, emps_wrapper)).pack()

@@ -6,6 +6,7 @@ import tkinter.messagebox
 from calendar import monthrange
 from PIL import Image, ImageTk
 
+
 # Database methods
 def add_emp(emp_no, first_name, last_name, gender, birth_date, salary, title, dept_no, db):
     cursor = db.cursor()
